@@ -334,6 +334,7 @@ def compute_valleys(timeseries: np.ndarray) -> np.ndarray:
     time_seg_params = get_time_segment_param_dicts()
     time_seg_params = adjust_time_seg_params(time_seg_params, timeseries)
     peaks, _ = find_peaks(timeseries, distance=time_seg_params["peakDist"], prominence=time_seg_params["prom"])
+    print(peaks)
     valleys = []
     for kk in range(0, len(peaks) - 1):
         valleys.append(int(0.5 * peaks[kk] + 0.5 * peaks[kk + 1]))

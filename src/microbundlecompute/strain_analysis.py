@@ -109,7 +109,8 @@ def compute_F_from_Lambda_mat(Lambda_0: np.ndarray, Lambda_t: np.ndarray) -> np.
     Lambda matricies are units 2 x number of points.
     Will return the average deformation gradient F."""
     term_1 = np.dot(Lambda_t, np.transpose(Lambda_0))
-    term_2 = np.linalg.inv(np.dot(Lambda_0, np.transpose(Lambda_0)))
+    #term_2 = np.linalg.inv(np.dot(Lambda_0, np.transpose(Lambda_0)))
+    term_2 = np.linalg.pinv(np.dot(Lambda_0, np.transpose(Lambda_0)))
     F = np.dot(term_1, term_2)
     # add in error handling if issues arise here --
     return F
@@ -156,30 +157,204 @@ def compute_sub_domain_position(sd_tracker_row: List, sd_tracker_col: List, sd_b
         sd_col.append(col_pos)
     return np.asarray(sd_row), np.asarray(sd_col)
 
+def compute_region_center_displacement(
+    sd_tracker_row: np.ndarray,
+    sd_tracker_col: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute average region center displacement over time based on marker movement.
 
-def compute_sub_domain_position_strain_all(tracker_row_all: List, tracker_col_all: List, sd_box_list: List) -> List:
+    Args:
+        sd_tracker_row: (n_markers, n_frames) array of row positions over time.
+        sd_tracker_col: (n_markers, n_frames) array of col positions over time.
+
+    Returns:
+        row_positions: np.ndarray of region row center at each time step
+        col_positions: np.ndarray of region col center at each time step
+    """
+
+    if sd_tracker_row.ndim != 2 or sd_tracker_col.ndim != 2:
+        raise ValueError("Inputs must be 2D arrays (n_markers, n_frames)")
+
+    num_frames = sd_tracker_row.shape[1]
+
+    # Center at frame 0
+    center_row_0 = np.mean(sd_tracker_row[:, 0])
+    center_col_0 = np.mean(sd_tracker_col[:, 0])
+
+    row_positions = []
+    col_positions = []
+
+    for kk in range(num_frames):
+        delta_row = np.mean(sd_tracker_row[:, kk] - sd_tracker_row[:, 0])
+        delta_col = np.mean(sd_tracker_col[:, kk] - sd_tracker_col[:, 0])
+        row_positions.append(center_row_0 + delta_row)
+        col_positions.append(center_col_0 + delta_col)
+
+    return np.array(row_positions), np.array(col_positions)
+
+from scipy.spatial import cKDTree
+
+def isolate_sub_domain_markers_regions(
+    tracker_row_all: List[np.ndarray],
+    tracker_col_all: List[np.ndarray],
+    regions: np.ndarray,
+    region_index: int
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """
+    Assign markers to a region by finding the closest pixel in `regions` array.
+
+    Args:
+        tracker_row_all: List of np.ndarray (N x ...), marker row coords (floats).
+        tracker_col_all: List of np.ndarray (N x ...), marker col coords (floats).
+        regions: 2D np.ndarray with integer region labels.
+        region_index: integer region to isolate.
+
+    Returns:
+        sd_tracker_row_all, sd_tracker_col_all: Lists of arrays containing markers in the region.
+    """
+
+    # Precompute all pixel coordinates with a region label == region_index
+    region_mask = (regions == region_index)
+    region_coords = np.array(np.nonzero(region_mask)).T  # shape (num_pixels, 2)
+
+    if len(region_coords) == 0:
+        # No pixels for this region
+        return [np.empty((0, tracker_row_all[0].shape[1])) for _ in tracker_row_all], \
+               [np.empty((0, tracker_col_all[0].shape[1])) for _ in tracker_col_all]
+
+    # Build a KD-tree for fast nearest neighbor search on the region pixels
+    kd_tree = cKDTree(region_coords)
+
+    sd_tracker_row_all = []
+    sd_tracker_col_all = []
+
+    for kk in range(len(tracker_row_all)):
+        tracker_row = tracker_row_all[kk]
+        tracker_col = tracker_col_all[kk]
+
+        sd_tracker_row = []
+        sd_tracker_col = []
+
+        for jj in range(tracker_row.shape[0]):
+            # Marker position (float)
+            rr = tracker_row[jj, 0]
+            cc = tracker_col[jj, 0]
+
+            # Query nearest pixel in the target region
+            dist, idx = kd_tree.query([rr, cc], k=1)
+            nearest_pixel = region_coords[idx]
+
+            # If the closest pixel is in the region, append the marker
+            if dist < 5:  # threshold distance; adjust as needed
+                sd_tracker_row.append(tracker_row[jj, :])
+                sd_tracker_col.append(tracker_col[jj, :])
+
+        sd_tracker_row_all.append(np.asarray(sd_tracker_row))
+        sd_tracker_col_all.append(np.asarray(sd_tracker_col))
+
+    return sd_tracker_row_all, sd_tracker_col_all
+
+def plot_tracker_points_colored_by_region(tracker_row_all, tracker_col_all, regions):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import matplotlib.cm as cm
+
+    all_rows = []
+    all_cols = []
+    
+    # Loop over all frames (or sets)
+    for rows, cols in zip(tracker_row_all, tracker_col_all):
+        # rows, cols can be (n_markers, n_frames) or (n_markers,) arrays
+        # Flatten the arrays so we get all points as 1D arrays
+        all_rows.append(rows.flatten())
+        all_cols.append(cols.flatten())
+
+    # Concatenate all points across all frames
+    all_rows = np.concatenate(all_rows)
+    all_cols = np.concatenate(all_cols)
+
+    # Round or convert coordinates to int to index regions
+    rr = np.round(all_rows).astype(int)
+    cc = np.round(all_cols).astype(int)
+
+    # Clip to valid indices to avoid indexing errors
+    rr = np.clip(rr, 0, regions.shape[0]-1)
+    cc = np.clip(cc, 0, regions.shape[1]-1)
+
+    # Get region values at those points
+    region_values = regions[rr, cc]
+
+    plt.figure(figsize=(8, 8))
+    scatter = plt.scatter(all_cols, all_rows, c=region_values, cmap='tab20', s=10, alpha=0.8)
+    plt.gca().invert_yaxis()  # Optional: depends on image coords
+
+    plt.colorbar(scatter, label='Region Index')
+    plt.title("Tracker points colored by region")
+    plt.xlabel("Column")
+    plt.ylabel("Row")
+    plt.show()
+
+def compute_sub_domain_position_strain_all(reg, tracker_row_all: List, tracker_col_all: List, sd_box_list: List) -> List:
     """Given all tracker rows, columns, and sub-domain box domains. Will return the markers within each sub-domain box."""
     num_beats = len(tracker_col_all)
     sub_domain_F_all = []
     sub_domain_row_all = []
     sub_domain_col_all = []
-    for sd_box in sd_box_list:
-        sd_tracker_row_all, sd_tracker_col_all = isolate_sub_domain_markers(tracker_row_all, tracker_col_all, sd_box)
+    unique_regions = np.unique(reg)
+    unique_regions = unique_regions[unique_regions != 0]
+    # for sd_box in sd_box_list:
+    for i in unique_regions:
+        # sd_tracker_row_all, sd_tracker_col_all = isolate_sub_domain_markers(tracker_row_all, tracker_col_all, sd_box)
+        sd_tracker_row_all, sd_tracker_col_all = isolate_sub_domain_markers_regions(tracker_row_all, tracker_col_all, reg, i)
         F_list = []
         sd_row = []
         sd_col = []
         for kk in range(0, num_beats):
             sd_tracker_row = sd_tracker_row_all[kk]
             sd_tracker_col = sd_tracker_col_all[kk]
-            sd_F_array = compute_sub_domain_strain(sd_tracker_row, sd_tracker_col)
-            F_list.append(sd_F_array)
-            sd_row_kk, sd_col_kk = compute_sub_domain_position(sd_tracker_row, sd_tracker_col, sd_box)
+            if sd_tracker_row.shape[0] == 0:
+                F_list.append(np.full((68, 4), np.nan))  # or continue
+            else:
+                F = compute_sub_domain_strain(sd_tracker_row, sd_tracker_col)
+                F_list.append(F)
+            # sd_row_kk, sd_col_kk = compute_sub_domain_position(sd_tracker_row, sd_tracker_col, sd_box)
+            if sd_tracker_row.ndim != 2 or sd_tracker_col.ndim != 2 or sd_tracker_row.shape[0] == 0:
+                sd_row_kk = np.full((68,), np.nan)
+                sd_col_kk = np.full((68,), np.nan)
+            else:
+                sd_row_kk, sd_col_kk = compute_region_center_displacement(sd_tracker_row, sd_tracker_col)
             sd_row.append(sd_row_kk)
             sd_col.append(sd_col_kk)
         sub_domain_F_all.append(F_list)
         sub_domain_row_all.append(sd_row)
         sub_domain_col_all.append(sd_col)
+    # plot_tracker_points_colored_by_region(tracker_row_all, tracker_col_all, reg)
     return sub_domain_F_all, sub_domain_row_all, sub_domain_col_all
+
+# def compute_sub_domain_position_strain_all(tracker_row_all: List, tracker_col_all: List, sd_box_list: List) -> List:
+#     """Given all tracker rows, columns, and sub-domain box domains. Will return the markers within each sub-domain box."""
+#     num_beats = len(tracker_col_all)
+#     sub_domain_F_all = []
+#     sub_domain_row_all = []
+#     sub_domain_col_all = []
+#     for sd_box in sd_box_list:
+#         sd_tracker_row_all, sd_tracker_col_all = isolate_sub_domain_markers(tracker_row_all, tracker_col_all, sd_box)
+#         F_list = []
+#         sd_row = []
+#         sd_col = []
+#         for kk in range(0, num_beats):
+#             sd_tracker_row = sd_tracker_row_all[kk]
+#             sd_tracker_col = sd_tracker_col_all[kk]
+#             sd_F_array = compute_sub_domain_strain(sd_tracker_row, sd_tracker_col)
+#             F_list.append(sd_F_array)
+#             sd_row_kk, sd_col_kk = compute_sub_domain_position(sd_tracker_row, sd_tracker_col, sd_box)
+#             sd_row.append(sd_row_kk)
+#             sd_col.append(sd_col_kk)
+#         sub_domain_F_all.append(F_list)
+#         sub_domain_row_all.append(sd_row)
+#         sub_domain_col_all.append(sd_col)
+#     return sub_domain_F_all, sub_domain_row_all, sub_domain_col_all
 
 
 def format_F_for_save(sub_domain_F_all: List) -> List:
@@ -329,39 +504,89 @@ def get_text_str(row: int, col: int) -> str:
     return test_str
 
 
+
+def get_text_str_from_index(idx: int, num_cols: int = 10) -> str:
+    row = idx // num_cols
+    col = idx % num_cols
+    return get_text_str(row, col)
+
 def png_sub_domains_numbered(
     folder_path: Path,
     example_tiff: np.ndarray,
-    sub_domain_row: List,
-    sub_domain_col: List,
-    sub_domain_side: Union[float, int],
-    num_sd_row: int,
-    num_sd_col: int,
+    regions: np.ndarray,
     fname: str = "strain_",
-    col_map: object = plt.cm.rainbow
+    col_map=plt.cm.rainbow
 ) -> List:
-    """Given information to visualize the sub-domains. Will plot the subdomains and label them.
-    Rows are labeled A, B, C, etc. -- columns are labeled 1, 2, 3, etc. """
+    import matplotlib.patheffects as pe
+    from skimage import measure
+
     vis_folder_path = ia.create_folder(folder_path, "visualizations")
     pngs_folder_path = ia.create_folder(vis_folder_path, "strain_pngs")
     img_path = pngs_folder_path.joinpath(fname + "sub_domain_key.pdf").resolve()
     plt.figure()
     plt.imshow(example_tiff, cmap=plt.cm.gray)
-    sds = sub_domain_side / 2.0
-    for cc in range(0, num_sd_col):
-        for rr in range(0, num_sd_row):
-            idx = rr * num_sd_col + cc
-            center_row = sub_domain_row[idx, 0]
-            center_col = sub_domain_col[idx, 0]
-            text_str = get_text_str(rr, cc)
-            plt.text(center_col, center_row, text_str, color=col_map(idx / (num_sd_col * num_sd_row)), fontsize= int(sub_domain_side/3) ,horizontalalignment="center", verticalalignment="center",path_effects=[pe.Stroke(linewidth=1, foreground='k'), pe.Normal()])
-            corners_rr = [center_row - sds, center_row - sds, center_row + sds, center_row + sds, center_row - sds]
-            corners_cc = [center_col - sds, center_col + sds, center_col + sds, center_col - sds, center_col - sds]
-            plt.plot(corners_cc, corners_rr, "k-", linewidth=1)
+    
+    region_labels = np.unique(regions)
+    region_labels = region_labels[region_labels != 0]  # exclude background if labeled 0
+    
+    for idx, label in enumerate(region_labels):
+        mask = (regions == label)
+        contours = measure.find_contours(mask.astype(float), 0.5)
+        if len(contours) == 0:
+            continue
+        contour = contours[0]  # might be multiple contours, take first or all
+        
+        # contour is (N, 2) array: rows, cols
+        plt.plot(contour[:, 1], contour[:, 0], color=col_map(idx / len(region_labels)), linewidth=1)
+        
+        # Compute centroid for label placement
+        coords = np.column_stack(np.where(mask))
+        center_row, center_col = np.mean(coords, axis=0)
+        
+        text_str = get_text_str_from_index(idx)  # your function or adapt
+        plt.text(center_col, center_row, text_str, color=col_map(idx / len(region_labels)),
+                 fontsize=12, horizontalalignment="center", verticalalignment="center",
+                 path_effects=[pe.Stroke(linewidth=1, foreground='k'), pe.Normal()])
+    
     plt.axis("off")
-    plt.savefig(str(img_path),format='pdf')
+    plt.savefig(str(img_path), format='pdf')
     plt.close()
     return img_path
+
+
+# def png_sub_domains_numbered(
+#     folder_path: Path,
+#     example_tiff: np.ndarray,
+#     sub_domain_row: List,
+#     sub_domain_col: List,
+#     sub_domain_side: Union[float, int],
+#     num_sd_row: int,
+#     num_sd_col: int,
+#     fname: str = "strain_",
+#     col_map: object = plt.cm.rainbow
+# ) -> List:
+#     """Given information to visualize the sub-domains. Will plot the subdomains and label them.
+#     Rows are labeled A, B, C, etc. -- columns are labeled 1, 2, 3, etc. """
+#     vis_folder_path = ia.create_folder(folder_path, "visualizations")
+#     pngs_folder_path = ia.create_folder(vis_folder_path, "strain_pngs")
+#     img_path = pngs_folder_path.joinpath(fname + "sub_domain_key.pdf").resolve()
+#     plt.figure()
+#     plt.imshow(example_tiff, cmap=plt.cm.gray)
+#     sds = sub_domain_side / 2.0
+#     for cc in range(0, num_sd_col):
+#         for rr in range(0, num_sd_row):
+#             idx = rr * num_sd_col + cc
+#             center_row = sub_domain_row[idx, 0]
+#             center_col = sub_domain_col[idx, 0]
+#             text_str = get_text_str(rr, cc)
+#             plt.text(center_col, center_row, text_str, color=col_map(idx / (num_sd_col * num_sd_row)), fontsize= int(sub_domain_side/3) ,horizontalalignment="center", verticalalignment="center",path_effects=[pe.Stroke(linewidth=1, foreground='k'), pe.Normal()])
+#             corners_rr = [center_row - sds, center_row - sds, center_row + sds, center_row + sds, center_row - sds]
+#             corners_cc = [center_col - sds, center_col + sds, center_col + sds, center_col - sds, center_col - sds]
+#             plt.plot(corners_cc, corners_rr, "k-", linewidth=1)
+#     plt.axis("off")
+#     plt.savefig(str(img_path),format='pdf')
+#     plt.close()
+#     return img_path
 
 
 def png_sub_domain_strain_timeseries_all(
@@ -507,6 +732,146 @@ def create_gif(folder_path: Path, png_path_list: List, fname="sub_domain_strain"
     ani.save(gif_path,dpi=100)
     return gif_path
 
+from skimage.morphology import erosion, rectangle
+import matplotlib.pyplot as plt
+
+def erode_vertical_waist_in_horizontal_band(mask, waist_fraction=0.6, erosion_radius=10):
+    """
+    Erodes the mask vertically (top and bottom) but only in the horizontal waist region.
+    
+    Params:
+    - mask: 2D binary mask (np.ndarray)
+    - waist_fraction: fraction of the mask width to consider as waist (centered)
+    - erosion_radius: radius of vertical erosion
+    
+    Returns:
+    - eroded_mask: mask with vertically eroded waist
+    """
+    height, width = mask.shape
+
+    # Define waist horizontal range (centered)
+    waist_width = int(width * waist_fraction)
+    left = (width - waist_width) // 2
+    right = left + waist_width
+    waist_slice = slice(left, right)
+
+    # Extract just the waist region horizontally
+    waist_region = np.zeros_like(mask)
+    waist_region[:, waist_slice] = mask[:, waist_slice]
+
+    # Create a vertical structuring element for erosion (taller than wider)
+    selem = rectangle(erosion_radius * 2 + 1, 1)  # tall vertical line
+
+    # Erode only the waist region vertically
+    eroded_waist = erosion(waist_region, selem)
+
+    # Compose final mask:
+    eroded_mask = mask.copy()
+    eroded_mask[:, waist_slice] = eroded_waist[:, waist_slice]
+
+    return eroded_mask
+
+def custom_region_segmentation(mask):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    def get_utc_images(bk):
+        i = np.arange(bk.shape[0])
+        j = np.arange(bk.shape[1])
+        I, J = np.meshgrid(j, i)
+
+        axis_dir = J / np.max(J)
+        trans_dir = np.zeros_like(axis_dir, dtype=float)  # make sure it's float for fractional values
+
+        for row_idx in range(J.shape[0]):
+            positive_indices = np.where(bk[row_idx, :] > 0)[0]
+            if positive_indices.size == 0:
+                # No positive values in this row, assign 0 or some default
+                trans_dir[row_idx] = 0
+                continue
+
+            lims = positive_indices[[0, -1]]
+            size = lims[1] - lims[0]
+
+            if size == 0:
+                # All positive values are at a single point
+                trans_dir[row_idx] = 0  # or 1, depending on logic
+            else:
+                trans_dir[row_idx] = (I[row_idx] - lims[0]) / size
+
+        # Clamp values between 0 and 1
+        trans_dir = np.clip(trans_dir, 0, 1)
+
+        return axis_dir, trans_dir
+
+    nx, ny = 5, 10
+    nregions = nx*ny
+
+    # mask = ia.remove_pillar_region(mask, 0.6, clip_columns=False, clip_rows=True)
+    # mask = ia.remove_pillar_region(mask, 0.15, clip_columns=True, clip_rows=False)
+
+    axis_dir, trans_dir = get_utc_images(mask)
+
+    # Mask valid pixels
+    valid_pixels = mask > 0
+
+    # Extract axis_dir and trans_dir values only inside the mask
+    axis_valid = axis_dir[valid_pixels]
+    trans_valid = trans_dir[valid_pixels]
+
+    # Compute quantiles to split data into nx and ny bins with equal pixels
+    xlims = np.quantile(axis_valid, np.linspace(0, 1, nx + 1))
+    ylims = np.quantile(trans_valid, np.linspace(0, 1, ny + 1))
+
+    regions = np.zeros_like(mask, dtype=int)
+
+    for i in range(nx):
+        for j in range(ny):
+            region_mask = (
+                (axis_dir >= xlims[i]) & (axis_dir < xlims[i + 1]) &
+                (trans_dir >= ylims[j]) & (trans_dir < ylims[j + 1]) &
+                valid_pixels
+            )
+            regions[region_mask] = i + j * nx + 1
+
+    # Optional: assign zero to pixels outside mask explicitly
+    regions[~valid_pixels] = 0
+
+    # plt.figure()
+    # plt.imshow(regions, cmap='jet', vmin=0, vmax=nregions)
+    # plt.axis('off')
+    # plt.show()
+
+    return regions
+
+def extract_tile_info(regions: np.ndarray):
+    import scipy.ndimage as ndi
+
+    unique_regions = np.unique(regions)
+    unique_regions = unique_regions[unique_regions != 0]
+
+    objects = ndi.find_objects(regions)
+
+    tile_heights = []
+    tile_widths = []
+
+    for sl in objects:
+        if sl is None:
+            continue
+        tile_heights.append(sl[0].stop - sl[0].start)
+        tile_widths.append(sl[1].stop - sl[1].start)
+
+    tile_dim_pix = (int(np.median(tile_heights)), int(np.median(tile_widths)))
+
+    centroids = ndi.center_of_mass(regions > 0, labels=regions, index=unique_regions)
+    rows = np.array([c[0] for c in centroids])
+    cols = np.array([c[1] for c in centroids])
+
+    num_tile_row = len(np.unique(np.round(rows).astype(int)))
+    num_tile_col = len(np.unique(np.round(cols).astype(int)))
+
+    return num_tile_row, num_tile_col, tile_dim_pix
+
 
 def run_sub_domain_strain_analysis(
     folder_path: Path,
@@ -530,7 +895,6 @@ def run_sub_domain_strain_analysis(
     # read images and mask file
     mask_file_path = folder_path.joinpath("masks").resolve().joinpath("tissue_mask.txt").resolve()
     mask = ia.read_txt_as_mask(mask_file_path)
-
     # load tracking results
     tracker_row_all, tracker_col_all, _, _ = ia.load_tracking_results(folder_path=folder_path)
     
@@ -555,12 +919,18 @@ def run_sub_domain_strain_analysis(
         else:
             rot_mask = mask
             rot_tracker_row_all_pad, rot_tracker_col_all_pad = tracker_row_all, tracker_col_all
+
+        rot_mask = erode_vertical_waist_in_horizontal_band(rot_mask, erosion_radius=7)
+        seg_regions = custom_region_segmentation(rot_mask)
+        # np.save('./rot_mask.npy', rot_mask)
+        
         # create sub-domains
         sub_domain_box_list, tile_dim_pix, num_tile_row, num_tile_col = create_sub_domains(rot_mask, pillar_clip_fraction=pillar_clip_fraction, shrink_row=shrink_row, shrink_col=shrink_col, tile_dim_pix=tile_dim_pix, num_tile_row=num_tile_row, num_tile_col=num_tile_col, tile_style=tile_style,clip_columns=clip_columns,clip_rows=clip_rows,manual_sub= manual_sub,sub_extents=sub_extents) 
         # compute strain in each sub-domain
-        sub_domain_F_all, sub_domain_row_all, sub_domain_col_all = compute_sub_domain_position_strain_all(rot_tracker_row_all_pad, rot_tracker_col_all_pad, sub_domain_box_list) 
+        sub_domain_F_all, sub_domain_row_all, sub_domain_col_all = compute_sub_domain_position_strain_all(seg_regions, rot_tracker_row_all_pad, rot_tracker_col_all_pad, sub_domain_box_list) 
         # save the sub-domain strains
-        strain_sub_domain_info = np.asarray([[num_tile_row, num_tile_col], [tile_dim_pix, tile_dim_pix], [center_row, center_col], [vec[0], vec[1]]])
+        num_tile_row, num_tile_col, tile_dim_pix = extract_tile_info(seg_regions)
+        strain_sub_domain_info = np.asarray([[num_tile_row, num_tile_col], [tile_dim_pix[0], tile_dim_pix[1]], [center_row, center_col], [vec[0], vec[1]]])
     else:
         # create sub-domains
         sub_domain_box_list, tile_dim_pix, num_tile_row, num_tile_col = create_sub_domains(mask, pillar_clip_fraction=pillar_clip_fraction, shrink_row=shrink_row, shrink_col=shrink_col, tile_dim_pix=tile_dim_pix, num_tile_row=num_tile_row, num_tile_col=num_tile_col, tile_style=tile_style,clip_columns=clip_columns,clip_rows=clip_rows,manual_sub= manual_sub,sub_extents=sub_extents)

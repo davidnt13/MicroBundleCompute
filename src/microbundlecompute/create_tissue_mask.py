@@ -138,6 +138,7 @@ def save_mask(folder_path: Path, mask: np.ndarray, fname: str = "tissue_mask"):
 def run_create_tissue_mask(folder_path: Path, seg_fcn_num: int = 1, fname: str = "tissue_mask", frame_num: int = 0, method: str = "minimum"):
     """Given a folder and selection of mask segmentation settings. Will segment and save the tissue mask."""
     # load the first image
+    print(folder_path)
     movie_folder_path = folder_path.joinpath("movie").resolve()
     name_list_path = ia.image_folder_to_path_list(movie_folder_path)
     tiff_list = ia.read_all_tiff(name_list_path)

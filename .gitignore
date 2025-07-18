@@ -2,3 +2,7 @@
 /.coverage
 /.pytest_cache
 /node_modules
+__pycache__/
+*.tif
+*.png
+temp_folder/
