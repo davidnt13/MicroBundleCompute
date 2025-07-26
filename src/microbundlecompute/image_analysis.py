@@ -480,8 +480,10 @@ def run_tracking(folder_path: Path, fps: int, length_scale: float) -> List:
     """Given a folder path. Will perform tracking and save results as text files."""
     # read images and mask file
     movie_folder_path = folder_path.joinpath("movie").resolve()
+    print(movie_folder_path)
     name_list_path = image_folder_to_path_list(movie_folder_path)
     tiff_list = read_all_tiff(name_list_path)
+    print(tiff_list)
     img_list_uint8 = uint16_to_uint8_all(tiff_list)
     mask_file_path = folder_path.joinpath("masks").resolve().joinpath("tissue_mask.txt").resolve()
     mask = read_txt_as_mask(mask_file_path)
